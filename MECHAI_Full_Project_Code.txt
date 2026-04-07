@@ -1,0 +1,1155 @@
+======================================================================
+  MECHAI — FULL PROJECT SOURCE CODE
+  CAD AI Chat-to-3D Prototype
+======================================================================
+
+PROJECT STRUCTURE:
+----------------------------------------
+
+├── index.html
+├── package.json
+├── vite.config.ts
+├── tailwind.config.ts
+├── src/
+│   ├── main.tsx
+│   ├── App.tsx
+│   ├── index.css
+│   ├── lib/
+│   │   ├── api.ts
+│   │   └── utils.ts
+│   ├── components/
+│   │   ├── ChatMessage.tsx
+│   │   ├── TypingIndicator.tsx
+│   │   ├── DesignLoader.tsx
+│   │   ├── ModelViewer.tsx
+│   │   └── ui/ (shadcn components)
+│   └── pages/
+│       └── Index.tsx
+└── mechai_server.py  (Python backend — run separately)
+
+
+======================================================================
+  PART 1: REACT FRONTEND (Lovable)
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/pages/Index.tsx
+DESC: Main Page — Chat UI + State Management
+──────────────────────────────────────────────────────────────────────
+import { useState, useRef, useEffect } from "react";
+import { ChatMessage as ChatMessageComponent } from "@/components/ChatMessage";
+import { TypingIndicator } from "@/components/TypingIndicator";
+import { DesignLoader } from "@/components/DesignLoader";
+import { ModelViewer } from "@/components/ModelViewer";
+import { sendChatMessage, getModelUrl, type ChatMessage } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Send, Cpu } from "lucide-react";
+
+type AppState = "chat" | "designing" | "viewing";
+
+export default function Index() {
+  const [state, setState] = useState<AppState>("chat");
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { role: "assistant", content: "Hello! I'm **MECHAI**, your AI-powered mechanical design assistant.\n\nWhat are we designing today?" },
+  ]);
+  const [input, setInput] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
+  const [stlUrl, setStlUrl] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, isTyping]);
+
+  const handleSend = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || isTyping) return;
+
+    const userMsg: ChatMessage = { role: "user", content: trimmed };
+    const newHistory = [...messages, userMsg];
+    setMessages(newHistory);
+    setInput("");
+    setIsTyping(true);
+
+    try {
+      const response = await sendChatMessage(trimmed, messages);
+      const botMsg: ChatMessage = { role: "assistant", content: response.reply };
+      setMessages((prev) => [...prev, botMsg]);
+
+      if (response.designing) {
+        setState("designing");
+        // Poll or wait for STL — the designing flag means the backend is working
+        // The stl_url will come in the response when ready
+      }
+
+      if (response.stl_url) {
+        setStlUrl(getModelUrl(response.stl_url));
+        setState("viewing");
+      }
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "⚠️ Could not connect to the MECHAI backend. Make sure your Python server is running on `localhost:5000`." },
+      ]);
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const handleBackToChat = () => {
+    setMessages([
+      { role: "assistant", content: "Ready for a new design! What would you like to create?" },
+    ]);
+    setStlUrl(null);
+    setState("chat");
+  };
+
+  if (state === "designing") return <DesignLoader />;
+  if (state === "viewing" && stlUrl) return <ModelViewer stlUrl={stlUrl} onBackToChat={handleBackToChat} />;
+
+  return (
+    <div className="flex h-screen flex-col bg-background">
+      {/* Header */}
+      <header className="flex items-center gap-3 border-b border-border px-6 py-4 glass">
+        <div className="flex items-center gap-2">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 glow-primary">
+            <Cpu className="h-5 w-5 text-primary" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold tracking-tight text-foreground">
+              MEC<span className="text-primary">HAI</span>
+            </h1>
+            <p className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              Mechanical Design AI
+            </p>
+          </div>
+        </div>
+      </header>
+
+      {/* Messages */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6">
+        <div className="mx-auto flex max-w-2xl flex-col gap-4">
+          {messages.map((msg, i) => (
+            <ChatMessageComponent key={i} role={msg.role} content={msg.content} />
+          ))}
+          {isTyping && <TypingIndicator />}
+        </div>
+      </div>
+
+      {/* Input */}
+      <div className="border-t border-border px-4 py-4 glass">
+        <div className="mx-auto flex max-w-2xl gap-2">
+          <Input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Describe your part or provide dimensions..."
+            className="flex-1 bg-muted/50 border-border/50 focus-visible:ring-primary/50"
+            disabled={isTyping}
+          />
+          <Button onClick={handleSend} disabled={isTyping || !input.trim()} className="glow-primary">
+            <Send className="h-4 w-4" />
+          </Button>
+        </div>
+        <p className="mx-auto mt-2 max-w-2xl text-center text-[11px] text-muted-foreground font-mono">
+          Connected to local Ollama • build123d pipeline
+        </p>
+      </div>
+    </div>
+  );
+}
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/components/ChatMessage.tsx
+DESC: Chat Message Bubble Component
+──────────────────────────────────────────────────────────────────────
+import { cn } from "@/lib/utils";
+import ReactMarkdown from "react-markdown";
+import { Bot, User } from "lucide-react";
+
+interface ChatMessageProps {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export function ChatMessage({ role, content }: ChatMessageProps) {
+  const isUser = role === "user";
+
+  return (
+    <div className={cn("flex gap-3 animate-fade-in", isUser ? "flex-row-reverse" : "flex-row")}>
+      <div
+        className={cn(
+          "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+          isUser ? "bg-primary/20 text-primary" : "bg-accent/20 text-accent"
+        )}
+      >
+        {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
+      </div>
+      <div
+        className={cn(
+          "max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
+          isUser
+            ? "bg-primary text-primary-foreground rounded-tr-sm"
+            : "bg-secondary text-secondary-foreground rounded-tl-sm"
+        )}
+      >
+        {isUser ? (
+          <p>{content}</p>
+        ) : (
+          <ReactMarkdown
+            components={{
+              p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+              strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
+              ul: ({ children }) => <ul className="list-disc pl-4 mb-2">{children}</ul>,
+              li: ({ children }) => <li className="mb-1">{children}</li>,
+            }}
+          >
+            {content}
+          </ReactMarkdown>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/components/TypingIndicator.tsx
+DESC: Typing Animation Component
+──────────────────────────────────────────────────────────────────────
+export function TypingIndicator() {
+  return (
+    <div className="flex gap-3 animate-fade-in">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent/20 text-accent">
+        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="4" cy="12" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <circle cx="20" cy="12" r="2" />
+        </svg>
+      </div>
+      <div className="bg-secondary rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="block h-2 w-2 rounded-full bg-muted-foreground"
+            style={{
+              animation: `typing-dot 1.4s ease-in-out ${i * 0.2}s infinite`,
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/components/DesignLoader.tsx
+DESC: Design Loading Screen
+──────────────────────────────────────────────────────────────────────
+import { useEffect, useState } from "react";
+import { Cog, Code, Box } from "lucide-react";
+
+const stages = [
+  { icon: Cog, label: "Crafting blueprint...", duration: 3000 },
+  { icon: Code, label: "Generating code...", duration: 3000 },
+  { icon: Box, label: "Building 3D model...", duration: 4000 },
+];
+
+export function DesignLoader() {
+  const [stageIndex, setStageIndex] = useState(0);
+
+  useEffect(() => {
+    if (stageIndex >= stages.length - 1) return;
+    const timer = setTimeout(() => setStageIndex((i) => i + 1), stages[stageIndex].duration);
+    return () => clearTimeout(timer);
+  }, [stageIndex]);
+
+  const current = stages[stageIndex];
+  const Icon = current.icon;
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-background">
+      {/* Glow rings */}
+      <div className="relative mb-12">
+        <div
+          className="absolute inset-0 rounded-full bg-primary/20 blur-3xl"
+          style={{ animation: "pulse-glow 2s ease-in-out infinite", width: 200, height: 200, margin: "-60px" }}
+        />
+        <div
+          className="relative flex h-20 w-20 items-center justify-center rounded-full border-2 border-primary/40 bg-card"
+          style={{ animation: "spin-slow 8s linear infinite" }}
+        >
+          <div style={{ animation: "spin-slow 8s linear infinite reverse" }}>
+            <Icon className="h-8 w-8 text-primary" />
+          </div>
+        </div>
+      </div>
+
+      {/* Stage label */}
+      <p className="text-xl font-medium text-foreground glow-text mb-6 animate-fade-in" key={stageIndex}>
+        {current.label}
+      </p>
+
+      {/* Progress dots */}
+      <div className="flex gap-3">
+        {stages.map((_, i) => (
+          <div
+            key={i}
+            className={`h-2 rounded-full transition-all duration-500 ${
+              i <= stageIndex ? "w-8 bg-primary" : "w-2 bg-muted"
+            }`}
+          />
+        ))}
+      </div>
+
+      <p className="mt-8 text-sm text-muted-foreground font-mono">MECHAI ENGINE</p>
+    </div>
+  );
+}
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/components/ModelViewer.tsx
+DESC: Three.js 3D STL Viewer
+──────────────────────────────────────────────────────────────────────
+import { Suspense, useRef, useState } from "react";
+import { Canvas } from "@react-three/fiber";
+import { OrbitControls, Grid, Environment, Center } from "@react-three/drei";
+import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { useLoader } from "@react-three/fiber";
+import * as THREE from "three";
+import { Button } from "@/components/ui/button";
+import { RotateCcw, Grid3x3, Download, MessageSquare } from "lucide-react";
+
+function STLModel({ url, wireframe }: { url: string; wireframe: boolean }) {
+  const geometry = useLoader(STLLoader, url);
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  // Center and scale
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox!;
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const scale = 3 / maxDim;
+
+  return (
+    <Center>
+      <mesh ref={meshRef} geometry={geometry} scale={scale} castShadow receiveShadow>
+        <meshStandardMaterial
+          color={wireframe ? "#00cc88" : "#22d3a0"}
+          wireframe={wireframe}
+          metalness={0.3}
+          roughness={0.4}
+        />
+      </mesh>
+    </Center>
+  );
+}
+
+function LoadingFallback() {
+  return (
+    <mesh>
+      <boxGeometry args={[1, 1, 1]} />
+      <meshStandardMaterial color="#22d3a0" wireframe />
+    </mesh>
+  );
+}
+
+interface ModelViewerProps {
+  stlUrl: string;
+  onBackToChat: () => void;
+}
+
+export function ModelViewer({ stlUrl, onBackToChat }: ModelViewerProps) {
+  const [wireframe, setWireframe] = useState(false);
+  const controlsRef = useRef<any>(null);
+
+  const handleReset = () => {
+    if (controlsRef.current) {
+      controlsRef.current.reset();
+    }
+  };
+
+  const handleDownload = () => {
+    const a = document.createElement("a");
+    a.href = stlUrl;
+    a.download = "mechai-model.stl";
+    a.click();
+  };
+
+  return (
+    <div className="flex h-screen flex-col bg-background">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between border-b border-border px-4 py-3 glass">
+        <div className="flex items-center gap-2">
+          <div className="h-3 w-3 rounded-full bg-primary animate-pulse" />
+          <span className="font-mono text-sm text-primary">MECHAI</span>
+          <span className="text-xs text-muted-foreground">/ Model Viewer</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={handleReset}>
+            <RotateCcw className="h-4 w-4" />
+            Reset
+          </Button>
+          <Button
+            variant={wireframe ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setWireframe(!wireframe)}
+          >
+            <Grid3x3 className="h-4 w-4" />
+            Wireframe
+          </Button>
+          <Button variant="ghost" size="sm" onClick={handleDownload}>
+            <Download className="h-4 w-4" />
+            Download
+          </Button>
+          <Button variant="outline" size="sm" onClick={onBackToChat} className="border-primary/30 text-primary hover:bg-primary/10">
+            <MessageSquare className="h-4 w-4" />
+            New Design
+          </Button>
+        </div>
+      </div>
+
+      {/* 3D Canvas */}
+      <div className="flex-1">
+        <Canvas
+          shadows
+          camera={{ position: [5, 5, 5], fov: 45 }}
+          style={{ background: "hsl(220, 20%, 7%)" }}
+        >
+          <ambientLight intensity={0.4} />
+          <directionalLight position={[10, 10, 5]} intensity={1} castShadow />
+          <directionalLight position={[-5, 5, -5]} intensity={0.3} />
+          <pointLight position={[0, 10, 0]} intensity={0.5} color="#22d3a0" />
+
+          <Suspense fallback={<LoadingFallback />}>
+            <STLModel url={stlUrl} wireframe={wireframe} />
+          </Suspense>
+
+          <Grid
+            infiniteGrid
+            cellSize={0.5}
+            cellThickness={0.5}
+            sectionSize={2}
+            sectionThickness={1}
+            cellColor="#1a2a3a"
+            sectionColor="#243040"
+            fadeDistance={20}
+            position={[0, -2, 0]}
+          />
+
+          <OrbitControls
+            ref={controlsRef}
+            enableDamping
+            dampingFactor={0.05}
+            minDistance={2}
+            maxDistance={20}
+          />
+        </Canvas>
+      </div>
+    </div>
+  );
+}
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/lib/api.ts
+DESC: API Service — Connects to Python Backend
+──────────────────────────────────────────────────────────────────────
+const API_BASE = "http://localhost:5000";
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatResponse {
+  reply: string;
+  stl_url?: string;
+  designing?: boolean;
+}
+
+export async function sendChatMessage(
+  message: string,
+  history: ChatMessage[]
+): Promise<ChatResponse> {
+  const res = await fetch(`${API_BASE}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, history }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`API error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export function getModelUrl(filename: string): string {
+  return `${API_BASE}/api/model/${filename}`;
+}
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/index.css
+DESC: Design System — Colors, Fonts, Animations
+──────────────────────────────────────────────────────────────────────
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 7%;
+    --foreground: 210 20% 92%;
+
+    --card: 220 18% 10%;
+    --card-foreground: 210 20% 92%;
+
+    --popover: 220 18% 10%;
+    --popover-foreground: 210 20% 92%;
+
+    --primary: 160 70% 45%;
+    --primary-foreground: 220 20% 7%;
+
+    --secondary: 220 16% 16%;
+    --secondary-foreground: 210 20% 80%;
+
+    --muted: 220 14% 14%;
+    --muted-foreground: 215 12% 50%;
+
+    --accent: 200 80% 55%;
+    --accent-foreground: 220 20% 7%;
+
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 210 20% 98%;
+
+    --border: 220 14% 18%;
+    --input: 220 14% 18%;
+    --ring: 160 70% 45%;
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 220 18% 8%;
+    --sidebar-foreground: 210 20% 80%;
+    --sidebar-primary: 160 70% 45%;
+    --sidebar-primary-foreground: 220 20% 7%;
+    --sidebar-accent: 220 14% 14%;
+    --sidebar-accent-foreground: 210 20% 80%;
+    --sidebar-border: 220 14% 18%;
+    --sidebar-ring: 160 70% 45%;
+
+    --mechai-glow: 160 70% 45%;
+    --mechai-blue: 200 80% 55%;
+    --mechai-surface: 220 16% 12%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer utilities {
+  .glow-primary {
+    box-shadow: 0 0 20px -5px hsl(var(--primary) / 0.4),
+                0 0 60px -15px hsl(var(--primary) / 0.2);
+  }
+
+  .glow-text {
+    text-shadow: 0 0 20px hsl(var(--primary) / 0.5);
+  }
+
+  .glass {
+    background: hsl(var(--card) / 0.6);
+    backdrop-filter: blur(16px);
+    border: 1px solid hsl(var(--border) / 0.5);
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes typing-dot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-4px); }
+}
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: tailwind.config.ts
+DESC: Tailwind Configuration
+──────────────────────────────────────────────────────────────────────
+import type { Config } from "tailwindcss";
+
+export default {
+  darkMode: ["class"],
+  content: ["./pages/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./app/**/*.{ts,tsx}", "./src/**/*.{ts,tsx}"],
+  prefix: "",
+  theme: {
+    container: {
+      center: true,
+      padding: "2rem",
+      screens: {
+        "2xl": "1400px",
+      },
+    },
+    extend: {
+      fontFamily: {
+        sans: ["Space Grotesk", "system-ui", "sans-serif"],
+        mono: ["JetBrains Mono", "monospace"],
+      },
+      colors: {
+        border: "hsl(var(--border))",
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        popover: {
+          DEFAULT: "hsl(var(--popover))",
+          foreground: "hsl(var(--popover-foreground))",
+        },
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+        sidebar: {
+          DEFAULT: "hsl(var(--sidebar-background))",
+          foreground: "hsl(var(--sidebar-foreground))",
+          primary: "hsl(var(--sidebar-primary))",
+          "primary-foreground": "hsl(var(--sidebar-primary-foreground))",
+          accent: "hsl(var(--sidebar-accent))",
+          "accent-foreground": "hsl(var(--sidebar-accent-foreground))",
+          border: "hsl(var(--sidebar-border))",
+          ring: "hsl(var(--sidebar-ring))",
+        },
+      },
+      borderRadius: {
+        lg: "var(--radius)",
+        md: "calc(var(--radius) - 2px)",
+        sm: "calc(var(--radius) - 4px)",
+      },
+      keyframes: {
+        "accordion-down": {
+          from: { height: "0" },
+          to: { height: "var(--radix-accordion-content-height)" },
+        },
+        "accordion-up": {
+          from: { height: "var(--radix-accordion-content-height)" },
+          to: { height: "0" },
+        },
+        "fade-in": {
+          "0%": { opacity: "0", transform: "translateY(8px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+      },
+      animation: {
+        "accordion-down": "accordion-down 0.2s ease-out",
+        "accordion-up": "accordion-up 0.2s ease-out",
+        "fade-in": "fade-in 0.3s ease-out forwards",
+      },
+    },
+  },
+  plugins: [require("tailwindcss-animate")],
+} satisfies Config;
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/App.tsx
+DESC: App Root — Router Setup
+──────────────────────────────────────────────────────────────────────
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import Index from "./pages/Index.tsx";
+import NotFound from "./pages/NotFound.tsx";
+
+const queryClient = new QueryClient();
+
+const App = () => (
+  <QueryClientProvider client={queryClient}>
+    <TooltipProvider>
+      <Toaster />
+      <Sonner />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Index />} />
+          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </BrowserRouter>
+    </TooltipProvider>
+  </QueryClientProvider>
+);
+
+export default App;
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: src/main.tsx
+DESC: Entry Point
+──────────────────────────────────────────────────────────────────────
+import { createRoot } from "react-dom/client";
+import App from "./App.tsx";
+import "./index.css";
+
+createRoot(document.getElementById("root")!).render(<App />);
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: index.html
+DESC: HTML Shell
+──────────────────────────────────────────────────────────────────────
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- TODO: Set the document title to the name of your application -->
+    <title>Lovable App</title>
+    <meta name="description" content="Lovable Generated Project" />
+    <meta name="author" content="Lovable" />
+
+    <!-- TODO: Update og:title to match your application name -->
+    <meta property="og:title" content="Lovable App" />
+    <meta property="og:description" content="Lovable Generated Project" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@Lovable" />
+    <meta name="twitter:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: vite.config.ts
+DESC: Vite Configuration
+──────────────────────────────────────────────────────────────────────
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react-swc";
+import path from "path";
+import { componentTagger } from "lovable-tagger";
+
+// https://vitejs.dev/config/
+export default defineConfig(({ mode }) => ({
+  server: {
+    host: "::",
+    port: 8080,
+    hmr: {
+      overlay: false,
+    },
+  },
+  plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
+  },
+}));
+
+
+──────────────────────────────────────────────────────────────────────
+FILE: package.json
+DESC: Dependencies
+──────────────────────────────────────────────────────────────────────
+{
+  "name": "vite_react_shadcn_ts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:dev": "vite build --mode development",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^3.10.0",
+    "@radix-ui/react-accordion": "^1.2.11",
+    "@radix-ui/react-alert-dialog": "^1.1.14",
+    "@radix-ui/react-aspect-ratio": "^1.1.7",
+    "@radix-ui/react-avatar": "^1.1.10",
+    "@radix-ui/react-checkbox": "^1.3.2",
+    "@radix-ui/react-collapsible": "^1.1.11",
+    "@radix-ui/react-context-menu": "^2.2.15",
+    "@radix-ui/react-dialog": "^1.1.14",
+    "@radix-ui/react-dropdown-menu": "^2.1.15",
+    "@radix-ui/react-hover-card": "^1.1.14",
+    "@radix-ui/react-label": "^2.1.7",
+    "@radix-ui/react-menubar": "^1.1.15",
+    "@radix-ui/react-navigation-menu": "^1.2.13",
+    "@radix-ui/react-popover": "^1.1.14",
+    "@radix-ui/react-progress": "^1.1.7",
+    "@radix-ui/react-radio-group": "^1.3.7",
+    "@radix-ui/react-scroll-area": "^1.2.9",
+    "@radix-ui/react-select": "^2.2.5",
+    "@radix-ui/react-separator": "^1.1.7",
+    "@radix-ui/react-slider": "^1.3.5",
+    "@radix-ui/react-slot": "^1.2.3",
+    "@radix-ui/react-switch": "^1.2.5",
+    "@radix-ui/react-tabs": "^1.1.12",
+    "@radix-ui/react-toast": "^1.2.14",
+    "@radix-ui/react-toggle": "^1.1.9",
+    "@radix-ui/react-toggle-group": "^1.1.10",
+    "@radix-ui/react-tooltip": "^1.2.7",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18",
+    "@tanstack/react-query": "^5.83.0",
+    "@types/three": "^0.170.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "date-fns": "^3.6.0",
+    "embla-carousel-react": "^8.6.0",
+    "input-otp": "^1.4.2",
+    "lucide-react": "^0.462.0",
+    "next-themes": "^0.3.0",
+    "react": "^18.3.1",
+    "react-day-picker": "^8.10.1",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "^7.61.1",
+    "react-markdown": "^9.0.1",
+    "react-resizable-panels": "^2.1.9",
+    "react-router-dom": "^6.30.1",
+    "recharts": "^2.15.4",
+    "sonner": "^1.7.4",
+    "tailwind-merge": "^2.6.0",
+    "tailwindcss-animate": "^1.0.7",
+    "three": "^0.170.0",
+    "vaul": "^0.9.9",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "@playwright/test": "^1.57.0",
+    "@tailwindcss/typography": "^0.5.16",
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.0.0",
+    "@types/node": "^22.16.5",
+    "@types/react": "^18.3.23",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react-swc": "^3.11.0",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9.32.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^15.15.0",
+    "jsdom": "^20.0.3",
+    "lovable-tagger": "^1.1.13",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.38.0",
+    "vite": "^5.4.19",
+    "vitest": "^3.2.4"
+  }
+}
+
+
+
+======================================================================
+  PART 2: PYTHON BACKEND (Run on your machine)
+======================================================================
+
+"""
+MECHAI Backend Server
+=====================
+Run this on your local machine where Ollama and build123d are installed.
+
+Setup:
+  pip install flask flask-cors openai build123d
+
+Usage:
+  1. Start Ollama:  ollama serve
+  2. Pull models:   ollama pull llama3.1 && ollama pull llama3.2
+  3. Run server:    python mechai_server.py
+
+The server runs at http://localhost:5000
+"""
+
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+from openai import OpenAI
+import os, re, traceback
+
+app = Flask(__name__)
+CORS(app)  # Allow all origins (Lovable preview)
+
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+
+# ─── Agent 1: Intro Bot (Parameter Collector) ───────────────────────────
+
+INTRO_SYSTEM = """You are the MECHAI Parameter Collector. Your sole purpose is to gather geometric dimensions for 3D modeling.
+
+CRITICAL BEHAVIOR:
+1. MINIMALISM: If the user provides dimensions (e.g., "10mm inner, 30mm outer, 20mm thick"), DO NOT ask about material, safety factors, or usage.
+2. THE "SHAPE" RULE: After dimensions are provided, you may ask ONLY ONE clarifying question regarding the profile (e.g., "Hexagonal or Circular?").
+3. NO REPETITION: Once a value is given, never ask for it again.
+4. TRIGGER: As soon as you have the dimensions and the shape, stop asking questions immediately.
+
+REQUIRED PARAMETERS BY CATEGORY:
+- Fasteners (Nuts/Bolts): Inner Dia, Outer Dia, Thickness/Length, Shape.
+- Basic Shapes (Boxes/Cylinders): L, W, H or Dia, Height.
+- Complex (Helmets/Custom): Overall Scale (Small/Medium/Large).
+
+RESPONSE PROTOCOL:
+- Greeting: Short ("Hello! What are we designing today?")
+- Acknowledgment: "Ok, noted."
+- Completion: Once all dimensions + shape are known, respond EXACTLY with:
+  "All required parameters collected.
+  Summary:
+  - Object: [Name]
+  - Dimensions: [List values]
+  - Shape: [Value]
+  Now the design process will be started."
+
+STRICT PROHIBITIONS:
+- NEVER ask about Material Type.
+- NEVER ask about Safety Factors or Stress.
+- NEVER explain how CAD works.
+- NEVER generate code."""
+
+
+# ─── Agent 2: Prompt Architect ──────────────────────────────────────────
+
+def prompt_agent(summary):
+    system = """You are the MECHAI Prompt Architect.
+Your task: Convert a user's dimension summary into a precise technical prompt for a CAD Coder.
+
+Rules for the Technical Prompt:
+1. Specify the library: 'build123d'.
+2. Specify the method: 'Builder Mode' (using with BuildPart() as result:).
+3. List exact variables: Define dimensions as float variables first.
+4. Structural Requirement: 'First create the base shape, then extrude, then subtract the center hole.'
+5. Constraint: 'Use ONLY Capitalized classes like Extrude, Hole, and RegularPolygon.'
+
+Output ONLY the final prompt. No conversation."""
+
+    res = client.chat.completions.create(
+        model="llama3.1",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Create a CAD prompt for this summary: {summary}"},
+        ],
+    )
+    return res.choices[0].message.content
+
+
+# ─── Agent 3: Coder ─────────────────────────────────────────────────────
+
+def coder_agent(blueprint):
+    system = """You are the MECHAI CAD Coder.
+Task: Write a single Python script using 'build123d' based on the technical blueprint.
+
+STRICT RULES:
+1. Start with: 'from build123d import *'
+2. Constraint: 'Use ONLY Capitalized classes like Extrude, Hole, and RegularPolygon.'
+3. Final object MUST be named 'result'.
+4. End with: 'result.part.export_stl("OUTPUT_PATH")'
+5. Output ONLY the raw Python code. No markdown backticks, no comments, no explanation."""
+
+    res = client.chat.completions.create(
+        model="llama3.1",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Generate the code for this blueprint: {blueprint}"},
+        ],
+        temperature=0,
+    )
+    return res.choices[0].message.content.strip()
+
+
+# ─── Execution Engine ───────────────────────────────────────────────────
+
+def execute_design(code):
+    from build123d import (
+        BuildPart, BuildSketch, RegularPolygon, Circle,
+        extrude, Hole, Axis, Plane
+    )
+
+    stl_path = os.path.join(MODEL_DIR, "model.stl")
+
+    # Clean markdown fences
+    clean = re.sub(r"```python|```", "", code).strip()
+    # Inject correct output path
+    clean = clean.replace('export_stl("model.stl")', f'export_stl("{stl_path}")')
+
+    if os.path.exists(stl_path):
+        os.remove(stl_path)
+
+    local_scope = {
+        "BuildPart": BuildPart, "BuildSketch": BuildSketch,
+        "RegularPolygon": RegularPolygon, "Circle": Circle,
+        "Extrude": extrude, "Hole": Hole, "Axis": Axis, "Plane": Plane,
+    }
+
+    exec(clean, globals(), local_scope)
+
+    if os.path.exists(stl_path):
+        return "model.stl"
+    return None
+
+
+# ─── API Routes ─────────────────────────────────────────────────────────
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.json
+    user_message = data.get("message", "")
+    history = data.get("history", [])
+
+    # Build messages for Ollama
+    messages = [{"role": "system", "content": INTRO_SYSTEM}]
+    for h in history:
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": user_message})
+
+    # Call Intro Bot
+    res = client.chat.completions.create(model="llama3.2", messages=messages)
+    bot_reply = res.choices[0].message.content
+
+    # Check if parameters are collected → run the full pipeline
+    if "All required parameters collected" in bot_reply:
+        try:
+            print("[MECHAI] Parameters collected. Running pipeline...")
+            blueprint = prompt_agent(bot_reply)
+            print(f"[MECHAI] Blueprint:\n{blueprint[:200]}...")
+            code = coder_agent(blueprint)
+            print(f"[MECHAI] Code:\n{code[:200]}...")
+            stl_file = execute_design(code)
+
+            if stl_file:
+                bot_reply += "\n\n✅ **Success!** Your 3D model has been generated."
+                return jsonify({"reply": bot_reply, "stl_url": stl_file})
+            else:
+                bot_reply += "\n\n⚠️ Model generation failed. Please try again with different dimensions."
+        except Exception as e:
+            print(f"[MECHAI] Pipeline error: {traceback.format_exc()}")
+            bot_reply += f"\n\n⚠️ Error during generation: {str(e)}"
+
+    return jsonify({"reply": bot_reply})
+
+
+@app.route("/api/model/<filename>", methods=["GET"])
+def serve_model(filename):
+    filepath = os.path.join(MODEL_DIR, filename)
+    if os.path.exists(filepath):
+        return send_file(filepath, mimetype="application/octet-stream")
+    return jsonify({"error": "File not found"}), 404
+
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("  MECHAI Backend Server")
+    print("  http://localhost:5000")
+    print("=" * 50)
+    app.run(host="0.0.0.0", port=5000, debug=True)
+
+
+======================================================================
+  SETUP INSTRUCTIONS
+======================================================================
+
+FRONTEND (React — already running in Lovable):
+  All code above is live in your Lovable project.
+  No setup needed — it runs automatically in the preview.
+
+BACKEND (Python — run on your local machine):
+  1. Save mechai_server.py to your computer
+  2. Install dependencies:
+     pip install flask flask-cors openai build123d
+  3. Make sure Ollama is running:
+     ollama serve
+  4. Pull the required models:
+     ollama pull llama3.1
+     ollama pull llama3.2
+  5. Start the server:
+     python mechai_server.py
+  6. The server runs at http://localhost:5000
+
+HOW IT WORKS:
+  1. User chats in the React UI (Lovable preview)
+  2. Messages are sent to your Python server (localhost:5000)
+  3. Agent 1 (Intro Bot) collects dimensions via Ollama
+  4. When parameters are complete:
+     → Agent 2 (Prompt Architect) creates a technical blueprint
+     → Agent 3 (Coder) generates build123d Python code
+     → Execution engine runs the code and exports STL
+  5. STL file is sent back to the React frontend
+  6. Three.js renders the 3D model with orbit controls
+
+KEY DEPENDENCIES (Frontend):
+  @react-three/fiber@^8.18
+  @react-three/drei@^9.122.0
+  three@^0.170.0
+  react-markdown@^9.0.1
+  react@^18.3.1
+  tailwindcss@^3.4
