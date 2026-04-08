@@ -21,7 +21,7 @@ import uuid
 import hashlib
 from openai import OpenAI
 
-# ── Ollama client ────────────────────────────────────────────────────────
+# â”€â”€ Ollama client â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
 
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -34,6 +34,8 @@ MAX_HISTORY_MESSAGES = 8
 PROMPT_MAX_TOKENS = 500
 CODER_MAX_TOKENS = 650
 COLLECTOR_MAX_TOKENS = 220
+MAX_AUTOFIX_RETRIES = 2
+CODE_MIN_LENGTH = 120
 
 _PROMPT_CACHE: dict[str, str] = {}
 _CODER_CACHE: dict[str, str] = {}
@@ -49,10 +51,10 @@ def prepare_viewer_model(stl_path: str) -> str | None:
     return viewer_path.replace("\\", "/")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  VERIFIED build123d CODE TEMPLATES
-#  Export syntax: export_stl(b.part, 'path')  — standalone function
-# ═══════════════════════════════════════════════════════════════════════════
+#  Export syntax: export_stl(b.part, 'path')  â€” standalone function
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def make_hex_nut(inner_r, outer_r, thickness, stl_path):
     return (
@@ -135,6 +137,17 @@ def make_cylinder(radius, height, stl_path):
     )
 
 
+def make_cylinder_with_hole(radius, height, hole_r, stl_path):
+    return (
+        "from build123d import *\n"
+        f"radius = {radius}; height = {height}; hole_r = {hole_r}\n"
+        "with BuildPart() as b:\n"
+        "    Cylinder(radius=radius, height=height)\n"
+        "    Hole(radius=hole_r, depth=height)\n"
+        f"export_stl(b.part, '{stl_path}')\n"
+    )
+
+
 def make_box(length, width, height, stl_path):
     return (
         "from build123d import *\n"
@@ -150,14 +163,64 @@ def make_washer(inner_r, outer_r, thickness, stl_path):
 
 def make_plate_with_holes(length, width, thickness, hole_r, hole_count, stl_path):
     """Rectangular plate with evenly spaced holes in a grid."""
+    cols = int(max(round(max(hole_count, 1) ** 0.5), 2))
+    rows = int(max((max(hole_count, 1) + cols - 1) // cols, 2))
     return (
         "from build123d import *\n"
         f"length = {length}; width = {width}; thickness = {thickness}\n"
-        f"hole_r = {hole_r}; hole_count = {hole_count}\n"
+        f"hole_r = {hole_r}; hole_count = {hole_count}; cols = {cols}; rows = {rows}\n"
         "with BuildPart() as b:\n"
-        "    Box(length, width, thickness)\n"
-        "    with GridLocations(length * 0.6, width * 0.6, 2, 2):\n"
-        "        Hole(radius=hole_r)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Rectangle(length, width)\n"
+        "    extrude(amount=thickness)\n"
+        "    x_spacing = max(length * 0.7 / max(cols - 1, 1), hole_r * 3.0)\n"
+        "    y_spacing = max(width * 0.7 / max(rows - 1, 1), hole_r * 3.0)\n"
+        "    with GridLocations(x_spacing, y_spacing, cols, rows):\n"
+        "        Hole(radius=hole_r, depth=thickness)\n"
+        f"export_stl(b.part, '{stl_path}')\n"
+    )
+
+
+def make_plate_center_hole(length, width, thickness, hole_r, stl_path):
+    return (
+        "from build123d import *\n"
+        f"length = {length}; width = {width}; thickness = {thickness}; hole_r = {hole_r}\n"
+        "with BuildPart() as b:\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Rectangle(length, width)\n"
+        "    extrude(amount=thickness)\n"
+        "    Hole(radius=hole_r, depth=thickness)\n"
+        f"export_stl(b.part, '{stl_path}')\n"
+    )
+
+
+def make_table(top_l, top_w, top_t, leg_w, leg_h, stl_path):
+    return (
+        "from build123d import *\n"
+        f"top_l = {top_l}; top_w = {top_w}; top_t = {top_t}\n"
+        f"leg_w = {leg_w}; leg_h = {leg_h}\n"
+        "with BuildPart() as b:\n"
+        "    with BuildSketch(Plane.XY.offset(leg_h)):\n"
+        "        Rectangle(top_l, top_w)\n"
+        "    extrude(amount=top_t)\n"
+        "    x_off = max((top_l - leg_w) / 2.0, leg_w * 0.6)\n"
+        "    y_off = max((top_w - leg_w) / 2.0, leg_w * 0.6)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        with Locations((-x_off, -y_off)):\n"
+        "            Rectangle(leg_w, leg_w)\n"
+        "    extrude(amount=leg_h)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        with Locations((-x_off, y_off)):\n"
+        "            Rectangle(leg_w, leg_w)\n"
+        "    extrude(amount=leg_h)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        with Locations((x_off, -y_off)):\n"
+        "            Rectangle(leg_w, leg_w)\n"
+        "    extrude(amount=leg_h)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        with Locations((x_off, y_off)):\n"
+        "            Rectangle(leg_w, leg_w)\n"
+        "    extrude(amount=leg_h)\n"
         f"export_stl(b.part, '{stl_path}')\n"
     )
 
@@ -212,12 +275,38 @@ def make_bracket(base_l, base_w, wall_h, thickness, stl_path):
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  OBJECT DETECTOR  — reads the summary and picks the right template
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#  OBJECT DETECTOR  â€” reads the summary and picks the right template
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+def _has_corner_feature_request(summary: str) -> bool:
+    s = summary.lower()
+    has_corner = "corner" in s
+    has_feature = any(
+        token in s for token in ("rectangle", "rectangles", "vertical", "post", "pillar", "boss", "feature")
+    )
+    explicit_four = bool(
+        re.search(r"\b(?:4|four)\s*(?:x\s*)?corners?\b", s)
+        or re.search(r"\b(?:at|in)\s+each\s+corner\b", s)
+    )
+    if "hole" in s and not has_feature:
+        return False
+    return has_corner and (has_feature or explicit_four)
+
+
+def _requires_four_corners(summary: str) -> bool:
+    s = summary.lower()
+    return bool(
+        re.search(r"\b(?:4|four)\s*(?:x\s*)?corners?\b", s)
+        or re.search(r"\b(?:at|in)\s+each\s+corner\b", s)
+        or "all corners" in s
+    )
+
 
 def detect_object(summary: str) -> str:
     s = summary.lower()
+    if _has_corner_feature_request(s):
+        return "plate"
     if any(w in s for w in ["screw", "machine screw", "wood screw", "self-tapping"]):
         return "screw"
     if any(w in s for w in ["bolt", "hex bolt", "carriage bolt", "stud bolt"]):
@@ -236,6 +325,14 @@ def detect_object(summary: str) -> str:
         return "shaft"
     if any(w in s for w in ["cylinder", "rod", "pipe", "tube"]):
         return "cylinder"
+    if any(w in s for w in ["gear", "tooth", "teeth"]):
+        return "gear"
+    if any(w in s for w in ["helmet", "visor", "head shell"]):
+        return "helmet"
+    if any(w in s for w in ["frame", "chassis", "skeleton"]):
+        return "frame"
+    if any(w in s for w in ["table", "desk"]):
+        return "table"
     if any(w in s for w in ["box", "cube", "rect", "block", "enclosure"]):
         return "box"
     return "unknown"
@@ -247,15 +344,264 @@ def parse_dims(summary: str):
     return [float(m) for m in matches if float(m) > 0]
 
 
+def classify_object(summary: str) -> str:
+    s = summary.lower()
+
+    if _has_corner_feature_request(s):
+        return "corner_feature_part"
+    if any(w in s for w in ("screw", "bolt", "nut", "washer", "bushing", "fastener", "thread", "threaded")):
+        return "fastener"
+    if any(w in s for w in ("gear", "tooth", "teeth")):
+        return "gear"
+    if any(w in s for w in ("table", "frame", "assembly", "chassis", "multi-part", "multipart")):
+        return "assembly"
+    if any(w in s for w in ("hole", "bore", "slot", "center hole", "bolt circle", "hole pattern", "multi-hole")):
+        return "hole_part"
+    if any(w in s for w in ("helmet", "organic", "shell")):
+        return "organic"
+    return "generic"
+
+
+def _extract_hole_count(summary: str, default: int = 4) -> int:
+    match = re.search(r"(\d+)\s*(?:x\s*)?(?:holes|hole)\b", summary, flags=re.IGNORECASE)
+    if match:
+        return max(int(match.group(1)), 1)
+    return max(default, 1)
+
+
+def generate_gear(summary: str, stl_path: str) -> str:
+    safe_path = stl_path.replace("\\", "/")
+    dims = parse_dims(summary)
+    outer_dia = dims[0] if len(dims) >= 1 else 60.0
+    thickness = dims[1] if len(dims) >= 2 else 10.0
+    tooth_count = int(round(dims[2])) if len(dims) >= 3 else 20
+    tooth_depth = dims[3] if len(dims) >= 4 else max(outer_dia * 0.08, 2.0)
+    tooth_count = max(tooth_count, 8)
+    root_radius = max((outer_dia / 2.0) - tooth_depth, outer_dia * 0.2)
+    pitch_circ = 2.0 * 3.14159265 * (outer_dia / 2.0)
+    tooth_width = max((pitch_circ / tooth_count) * 0.45, tooth_depth * 0.8)
+    return (
+        "from build123d import *\n"
+        f"root_radius = {root_radius}\n"
+        f"thickness = {thickness}\n"
+        f"tooth_count = {tooth_count}\n"
+        f"tooth_depth = {tooth_depth}\n"
+        f"tooth_width = {tooth_width}\n"
+        "with BuildPart() as b:\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Circle(radius=root_radius)\n"
+        "    extrude(amount=thickness)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        with PolarLocations(root_radius + tooth_depth * 0.5, tooth_count):\n"
+        "            Rectangle(tooth_depth, tooth_width)\n"
+        "    extrude(amount=thickness, mode=Mode.ADD)\n"
+        f"export_stl(b.part, '{safe_path}')\n"
+    )
+
+
+def generate_table(summary: str, stl_path: str) -> str:
+    safe_path = stl_path.replace("\\", "/")
+    dims = parse_dims(summary)
+    top_l = dims[0] if len(dims) >= 1 else 120.0
+    top_w = dims[1] if len(dims) >= 2 else 70.0
+    top_t = dims[2] if len(dims) >= 3 else 6.0
+    leg_h = dims[3] if len(dims) >= 4 else 72.0
+    leg_w = dims[4] if len(dims) >= 5 else max(min(top_l, top_w) * 0.08, 6.0)
+    return make_table(top_l, top_w, top_t, leg_w, leg_h, safe_path)
+
+
+def generate_hole_part(summary: str, stl_path: str) -> str:
+    safe_path = stl_path.replace("\\", "/")
+    dims = parse_dims(summary)
+    lowered = summary.lower()
+    obj = detect_object(summary)
+
+    if obj == "cylinder":
+        radius = (dims[0] / 2.0) if len(dims) >= 1 else 10.0
+        height = dims[1] if len(dims) >= 2 else 20.0
+        hole_r = (dims[2] / 2.0) if len(dims) >= 3 else max(radius * 0.35, 1.0)
+        return make_cylinder_with_hole(radius, height, hole_r, safe_path)
+
+    length = dims[0] if len(dims) >= 1 else 80.0
+    width = dims[1] if len(dims) >= 2 else 60.0
+    thickness = dims[2] if len(dims) >= 3 else 8.0
+    hole_r = (dims[3] / 2.0) if len(dims) >= 4 else max(min(length, width) * 0.06, 2.0)
+    hole_count = _extract_hole_count(summary, 4)
+    wants_pattern = any(
+        k in lowered for k in ("holes", "pattern", "grid", "bolt circle", "multi-hole", "multiple")
+    ) or hole_count > 1
+
+    if wants_pattern:
+        cols = int(max(round(hole_count ** 0.5), 2))
+        rows = int(max((hole_count + cols - 1) // cols, 2))
+        return (
+            "from build123d import *\n"
+            f"length = {length}; width = {width}; thickness = {thickness}\n"
+            f"hole_r = {hole_r}; hole_count = {hole_count}; cols = {cols}; rows = {rows}\n"
+            "with BuildPart() as b:\n"
+            "    with BuildSketch(Plane.XY):\n"
+            "        Rectangle(length, width)\n"
+            "    extrude(amount=thickness)\n"
+            "    x_spacing = max(length * 0.7 / max(cols - 1, 1), hole_r * 3.0)\n"
+            "    y_spacing = max(width * 0.7 / max(rows - 1, 1), hole_r * 3.0)\n"
+            "    with GridLocations(x_spacing, y_spacing, cols, rows):\n"
+            "        Hole(radius=hole_r, depth=thickness)\n"
+            f"export_stl(b.part, '{safe_path}')\n"
+        )
+
+    return make_plate_center_hole(length, width, thickness, hole_r, safe_path)
+
+
+def generate_corner_feature_part(summary: str, stl_path: str) -> str:
+    safe_path = stl_path.replace("\\", "/")
+    dims = parse_dims(summary)
+
+    if dims and _requires_four_corners(summary) and dims[0] == 4.0:
+        dims = dims[1:]
+
+    length = _extract_labeled_value(summary, [r"Base\s+Length", r"Plate\s+Length", r"Length"])
+    width = _extract_labeled_value(summary, [r"Base\s+Width", r"Plate\s+Width", r"Width"])
+    base_t = _extract_labeled_value(summary, [r"Base\s+Thickness", r"Plate\s+Thickness", r"Thickness"])
+    corner_l = _extract_labeled_value(summary, [r"Corner\s+Length", r"Corner\s+Size", r"Post\s+Length"])
+    corner_w = _extract_labeled_value(summary, [r"Corner\s+Width", r"Post\s+Width"])
+    corner_h = _extract_labeled_value(
+        summary,
+        [r"Corner\s+Height", r"Vertical\s+Height", r"Post\s+Height", r"Feature\s+Height"],
+    )
+
+    length = length if length is not None else (dims[0] if len(dims) >= 1 else 100.0)
+    width = width if width is not None else (dims[1] if len(dims) >= 2 else 80.0)
+    base_t = base_t if base_t is not None else (dims[2] if len(dims) >= 3 else 6.0)
+    corner_l = corner_l if corner_l is not None else (dims[3] if len(dims) >= 4 else max(min(length, width) * 0.15, 5.0))
+    corner_w = corner_w if corner_w is not None else (dims[4] if len(dims) >= 5 else corner_l)
+    corner_h = corner_h if corner_h is not None else (dims[5] if len(dims) >= 6 else max(base_t * 2.5, 10.0))
+
+    corner_l = min(max(corner_l, 1.0), max(length * 0.45, 1.0))
+    corner_w = min(max(corner_w, 1.0), max(width * 0.45, 1.0))
+    corner_h = max(corner_h, 1.0)
+
+    return (
+        "from build123d import *\n"
+        f"length = {length}\n"
+        f"width = {width}\n"
+        f"base_thickness = {base_t}\n"
+        f"corner_length = {corner_l}\n"
+        f"corner_width = {corner_w}\n"
+        f"corner_height = {corner_h}\n"
+        "x_off = max(length / 2.0 - corner_length / 2.0, corner_length / 2.0)\n"
+        "y_off = max(width / 2.0 - corner_width / 2.0, corner_width / 2.0)\n"
+        "with BuildPart() as b:\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Rectangle(length, width)\n"
+        "    extrude(amount=base_thickness)\n"
+        "    with BuildSketch(Plane.XY.offset(base_thickness)):\n"
+        "        with Locations(\n"
+        "            (-x_off, -y_off),\n"
+        "            (-x_off, y_off),\n"
+        "            (x_off, -y_off),\n"
+        "            (x_off, y_off),\n"
+        "        ):\n"
+        "            Rectangle(corner_length, corner_width)\n"
+        "    extrude(amount=corner_height)\n"
+        f"export_stl(b.part, '{safe_path}')\n"
+    )
+
+
+def generate_helmet(summary: str, stl_path: str) -> str:
+    safe_path = stl_path.replace("\\", "/")
+    dims = parse_dims(summary)
+    outer_r = (dims[0] / 2.0) if len(dims) >= 1 else 60.0
+    wall_t = dims[1] if len(dims) >= 2 else max(outer_r * 0.08, 2.0)
+    wall_t = min(max(wall_t, 1.0), outer_r * 0.4)
+    return (
+        "from build123d import *\n"
+        f"outer_r = {outer_r}\n"
+        f"wall_t = {wall_t}\n"
+        "with BuildPart() as b:\n"
+        "    Sphere(radius=outer_r)\n"
+        "    with BuildSketch(Plane.XY.offset(-outer_r * 0.55)):\n"
+        "        Rectangle(outer_r * 2.8, outer_r * 2.8)\n"
+        "    extrude(amount=outer_r * 2.0, mode=Mode.SUBTRACT)\n"
+        "    with BuildSketch(Plane.YZ.offset(outer_r * 0.35)):\n"
+        "        Rectangle(outer_r * 1.3, outer_r * 0.8)\n"
+        "    extrude(amount=outer_r * 2.2, mode=Mode.SUBTRACT)\n"
+        "    Shell(amount=-wall_t, openings=b.faces().sort_by(Axis.Z)[:1])\n"
+        f"export_stl(b.part, '{safe_path}')\n"
+    )
+
+
+def generate_frame(summary: str, stl_path: str) -> str:
+    safe_path = stl_path.replace("\\", "/")
+    dims = parse_dims(summary)
+    length = dims[0] if len(dims) >= 1 else 120.0
+    width = dims[1] if len(dims) >= 2 else 80.0
+    height = dims[2] if len(dims) >= 3 else 90.0
+    thickness = dims[3] if len(dims) >= 4 else 8.0
+    return (
+        "from build123d import *\n"
+        f"length = {length}; width = {width}; height = {height}; t = {thickness}\n"
+        "with BuildPart() as b:\n"
+        "    x = max(length / 2.0 - t / 2.0, t)\n"
+        "    y = max(width / 2.0 - t / 2.0, t)\n"
+        "    for sx in (-1, 1):\n"
+        "        for sy in (-1, 1):\n"
+        "            with BuildSketch(Plane.XY):\n"
+        "                with Locations((sx * x, sy * y)):\n"
+        "                    Rectangle(t, t)\n"
+        "            extrude(amount=height)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Rectangle(length, t)\n"
+        "    extrude(amount=t)\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Rectangle(t, width)\n"
+        "    extrude(amount=t)\n"
+        "    with BuildSketch(Plane.XY.offset(height - t)):\n"
+        "        Rectangle(length, t)\n"
+        "    extrude(amount=t)\n"
+        "    with BuildSketch(Plane.XY.offset(height - t)):\n"
+        "        Rectangle(t, width)\n"
+        "    extrude(amount=t)\n"
+        f"export_stl(b.part, '{safe_path}')\n"
+    )
+
+
+def generate_specialized_code(summary: str, stl_path: str) -> str | None:
+    obj = detect_object(summary)
+    cls = classify_object(summary)
+    if cls == "corner_feature_part":
+        return generate_corner_feature_part(summary, stl_path)
+    if obj == "table":
+        return generate_table(summary, stl_path)
+    if obj == "gear" or cls == "gear":
+        return generate_gear(summary, stl_path)
+    if cls == "hole_part":
+        return generate_hole_part(summary, stl_path)
+    if obj == "helmet" or cls == "organic":
+        return generate_helmet(summary, stl_path)
+    if obj == "frame":
+        return generate_frame(summary, stl_path)
+    return None
+
+
 def generate_fallback(summary: str, stl_path: str) -> str:
     safe_path = stl_path.replace("\\", "/")
     obj   = detect_object(summary)
     dims  = parse_dims(summary)
-    is_hex = "hex" in summary.lower()
+    lowered = summary.lower()
+    is_hex = "hex" in lowered
 
     print(f"[Fallback] Object='{obj}'  Dims={dims}  Hex={is_hex}")
 
-    # ── Assign dimensions with sensible defaults per object type ──────────
+    specialized = generate_specialized_code(summary, safe_path)
+    summary_class = classify_object(summary)
+    if specialized is not None and (
+        obj in {"table", "gear", "helmet", "frame"}
+        or summary_class in {"hole_part", "corner_feature_part"}
+    ):
+        print("[Fallback] Specialized code:\n", specialized)
+        return execute_code(specialized, stl_path, summary)
+
+    # â”€â”€ Assign dimensions with sensible defaults per object type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if obj == "screw":
         shaft_dia = _extract_labeled_value(summary, [r"Shaft\s+Dia(?:meter)?", r"Diameter", r"Dia(?:meter)?"])
         head_dia  = _extract_labeled_value(summary, [r"Head\s+Dia(?:meter)?"])
@@ -299,7 +645,14 @@ def generate_fallback(summary: str, stl_path: str) -> str:
         width     = dims[1] if len(dims) >= 2 else 40.0
         thickness = dims[2] if len(dims) >= 3 else 5.0
         hole_r    = dims[3] / 2 if len(dims) >= 4 else 4.0
-        code = make_plate_with_holes(length, width, thickness, hole_r, 4, safe_path)
+        wants_hole = "hole" in lowered or "bore" in lowered
+        wants_pattern = any(k in lowered for k in ["holes", "pattern", "grid", "bolt circle", "multi-hole", "multiple"])
+        if wants_hole and not wants_pattern:
+            code = make_plate_center_hole(length, width, thickness, hole_r, safe_path)
+        elif wants_hole:
+            code = generate_hole_part(summary, safe_path)
+        else:
+            code = make_box(length, width, thickness, safe_path)
 
     elif obj == "bushing":
         outer_r = (dims[0] / 2) if len(dims) >= 1 else 10.0
@@ -321,7 +674,23 @@ def generate_fallback(summary: str, stl_path: str) -> str:
     elif obj == "cylinder":
         radius = (dims[0] / 2) if len(dims) >= 1 else 10.0
         height = dims[1]        if len(dims) >= 2 else 20.0
-        code = make_cylinder(radius, height, safe_path)
+        if "hole" in lowered or "bore" in lowered:
+            hole_r = (dims[2] / 2) if len(dims) >= 3 else max(radius * 0.35, 1.0)
+            code = make_cylinder_with_hole(radius, height, hole_r, safe_path)
+        else:
+            code = make_cylinder(radius, height, safe_path)
+
+    elif obj == "table":
+        code = generate_table(summary, safe_path)
+
+    elif obj == "gear":
+        code = generate_gear(summary, safe_path)
+
+    elif obj == "helmet":
+        code = generate_helmet(summary, safe_path)
+
+    elif obj == "frame":
+        code = generate_frame(summary, safe_path)
 
     elif obj == "box":
         l = dims[0] if len(dims) >= 1 else 20.0
@@ -445,7 +814,32 @@ def build_direct_summary(user_message: str) -> str | None:
 
 
 def should_use_deterministic_pipeline(summary: str) -> bool:
-    return detect_object(summary) != "unknown"
+    obj = detect_object(summary)
+    if obj == "unknown":
+        return False
+
+    s = summary.lower()
+    cls = classify_object(summary)
+
+    if obj == "table":
+        return False
+    if cls == "fastener":
+        if obj not in {"washer", "bushing"} or any(k in s for k in ("thread", "threaded")):
+            return False
+    if cls in {"gear", "assembly", "hole_part", "organic"}:
+        return False
+
+    complex_keywords = (
+        "thread", "threaded", "screw", "bolt", "nut",
+        "table", "gear", "helmet", "frame", "assembly",
+        "hole", "bore", "center hole",
+        "stepped", "pattern", "grid", "polar", "multi-hole", "multiple holes",
+        "fillet", "chamfer", "shell",
+    )
+    if any(keyword in s for keyword in complex_keywords):
+        return False
+
+    return obj in {"box", "cylinder", "plate", "bracket", "washer", "bushing", "shaft"}
 
 
 def _cache_key(*parts: str) -> str:
@@ -453,9 +847,9 @@ def _cache_key(*parts: str) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  AGENTS
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 INTRO_SYSTEM = """You are the MECHAI Parameter Collector. Gather ALL geometric dimensions for 3D modeling.
 
@@ -472,10 +866,11 @@ PARAMETERS NEEDED:
 - Washers: Inner Dia, Outer Dia, Thickness.
 - Cylinders: Diameter, Height.
 - Boxes/Plates: Length, Width, Height/Thickness; ask if holes are needed.
+- Corner-feature plates: Base Length, Base Width, Base Thickness, Corner Feature Length, Corner Feature Width, Corner Feature Height, and whether all 4 corners are required.
 - Brackets: Base Length, Base Width, Wall Height, Thickness.
 - Bushings/Shafts: Outer Dia, Inner Dia (if hollow), Length.
 
-COMPLETION FORMAT — respond EXACTLY with:
+COMPLETION FORMAT â€” respond EXACTLY with:
 "All required parameters collected.
 Summary:
 - Object: [exact object name e.g. Screw / Hex Bolt / Hex Nut / Washer / Cylinder / Box / Bracket / Plate / Bushing]
@@ -494,37 +889,37 @@ PROHIBITIONS:
 def prompt_agent(summary: str) -> str:
     """
     Agent 2: Converts dimension summary into a structured CAD blueprint.
-    Enforces UNDERSTAND → DECOMPOSE → BUILD → APPLY pipeline.
+    Enforces UNDERSTAND â†’ DECOMPOSE â†’ BUILD â†’ APPLY pipeline.
     """
     system = """You are the MECHAI Prompt Architect. Your job is to convert a dimension summary
 into a precise, structured CAD blueprint for a CAD Coder who uses the build123d library.
 
-MANDATORY PIPELINE — follow ALL four steps in order:
+MANDATORY PIPELINE â€” follow ALL four steps in order:
 
-STEP 1 — UNDERSTAND:
+STEP 1 â€” UNDERSTAND:
   Read the summary. Identify the object type, all dimensions, and ALL features explicitly listed.
 
-STEP 2 — DECOMPOSE:
+STEP 2 â€” DECOMPOSE:
   Break the object into individual geometric parts. List each sub-part on its own line:
   e.g.  PART 1: Shaft (cylinder, radius=3mm, length=30mm)
         PART 2: Hex Head (hexagonal prism, outer_r=5.5mm, height=5mm)
         PART 3: External M6 Thread (Helix pitch=1mm swept over shaft)
 
-STEP 3 — BUILD SEQUENCE:
+STEP 3 â€” BUILD SEQUENCE:
   State the exact build order (which part is built first, second, etc.)
   and which build123d operations to use for each.
 
-STEP 4 — APPLY FEATURES:
+STEP 4 â€” APPLY FEATURES:
   List EVERY feature from the summary and the exact build123d call to use:
-  - Thread required?      → Helix(radius, pitch, height) + sweep()
-  - Hole required?        → Hole(radius, depth)
-  - Multiple holes?       → PolarLocations or GridLocations + Hole()
-  - Hollow/shell?         → shell(thickness)
-  - Chamfer/fillet?       → chamfer(edge, length) / fillet(edge, radius)
+  - Thread required?      â†’ Helix(radius, pitch, height) + sweep()
+  - Hole required?        â†’ Hole(radius, depth)
+  - Multiple holes?       â†’ PolarLocations or GridLocations + Hole()
+  - Hollow/shell?         â†’ shell(thickness)
+  - Chamfer/fillet?       â†’ chamfer(edge, length) / fillet(edge, radius)
 
 CRITICAL RULES:
 1. Library: build123d ONLY.
-2. Export: export_stl(b.part, 'path') — standalone function, NOT b.part.export_stl().
+2. Export: export_stl(b.part, 'path') â€” standalone function, NOT b.part.export_stl().
 3. BuildSketch MUST be nested INSIDE BuildPart context.
 4. extrude() and Hole() MUST be indented inside BuildPart block.
 5. For screws/bolts: shaft first, then head on top (offset plane + extrude).
@@ -534,7 +929,13 @@ CRITICAL RULES:
 9. NEVER replace an internal thread with a plain Hole().
 10. Output ENGLISH ONLY. Do not use Chinese or any other language.
 
-Output ONLY the structured blueprint (Steps 1–4). No code, no preamble."""
+CORNER FEATURE RULES (STRICT):
+1. If the summary includes "4 corners", "each corner", or corner rectangles/posts, this is mandatory multi-part geometry.
+2. Build order must be: base first, then corner features.
+3. Corner features must be positioned at the four corners using offsets derived from length/width.
+4. Never collapse corner-feature requests into one primitive box.
+
+Output ONLY the structured blueprint (Steps 1â€“4). No code, no preamble."""
 
     cache_id = _cache_key("prompt", summary)
     cached = _PROMPT_CACHE.get(cache_id)
@@ -555,7 +956,7 @@ Output ONLY the structured blueprint (Steps 1–4). No code, no preamble."""
     return output
 
 
-def coder_agent(blueprint: str, stl_path: str) -> str:
+def coder_agent(blueprint: str, stl_path: str, strict_instruction: str = "") -> str:
     """
     Agent 3: Generates complete, executable build123d Python code from blueprint.
     Enforces all feature rules: threads, holes, Shell, chamfer, fillet, patterns.
@@ -566,10 +967,16 @@ def coder_agent(blueprint: str, stl_path: str) -> str:
 
 You will receive a structured blueprint (UNDERSTAND / DECOMPOSE / BUILD / APPLY).
 You MUST implement EVERY part and EVERY feature described in the blueprint.
+You MUST generate complete geometry with full stacking and no omissions.
+For tables, model tabletop + exactly 4 legs.
+For cylinders/plates with holes, always use Hole().
+For stepped shafts, build multiple stacked sections using multiple extrudes.
+If user intent includes corner features (e.g. vertical rectangles/posts at 4 corners), build a base first and then exactly 4 corner bodies using Locations().
+For 4-corner requests, use corner placement tied to length/width offsets (corners), never center placement.
 
-════════════════════════════════════════════════════
-THREAD GENERATION — MANDATORY (NO EXCEPTIONS)
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+THREAD GENERATION â€” MANDATORY (NO EXCEPTIONS)
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 External threads (screws, bolts, studs):
   from build123d import *
   shaft_r = 3.0; pitch = 1.0; shaft_len = 30.0
@@ -598,9 +1005,9 @@ Internal threads (nuts):
   helix = Helix(pitch=pitch, height=thickness, radius=inner_r)
   # sweep a small inward-pointing triangular profile along helix
 
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 HOLE PATTERNS
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   # Bolt circle (polar):
   with PolarLocations(bolt_circle_r, hole_count):
       Hole(radius=hole_r, depth=plate_thickness)
@@ -609,38 +1016,43 @@ HOLE PATTERNS
   with GridLocations(x_spacing, y_spacing, cols, rows):
       Hole(radius=hole_r, depth=plate_thickness)
 
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 SHELL (hollow objects)
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   with BuildPart() as b:
       Box(length, width, height)
       Shell(amount=-wall_thickness, openings=b.faces().sort_by(Axis.Z)[-1:])
 
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 CHAMFER / FILLET
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   # Chamfer top edge of shaft:
   chamfer(b.edges().sort_by(Axis.Z)[-1], length=1.0)
   # Fillet a specific edge:
   fillet(b.edges().filter_by(GeomType.LINE)[0], radius=0.5)
 
-════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 GENERAL RULES
-════════════════════════════════════════════════════
-1. export_stl(b.part, '{safe_path}')  — standalone function, last line.
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+1. export_stl(b.part, '{safe_path}')  â€” standalone function, last line.
 2. All extrude / Hole / chamfer / fillet calls INSIDE BuildPart block.
 3. BuildSketch MUST be nested inside BuildPart.
 4. Define ALL dimensions as named float variables at the top of the script.
-5. Raw Python ONLY — NO markdown, NO backticks, NO inline comments beyond brief labels.
-6. If threads are required → implement Helix + sweep. A plain cylinder is FORBIDDEN.
-7. If a hole is required → use Hole(). A missing hole is FORBIDDEN.
-8. If shell/hollow is required → use shell(). A solid body is FORBIDDEN.
-9. If multiple holes are required → use PolarLocations or GridLocations.
+5. Raw Python ONLY â€” NO markdown, NO backticks, NO comments.
+6. If threads are required â†’ implement Helix + sweep. A plain cylinder is FORBIDDEN.
+7. If a hole is required â†’ use Hole(). A missing hole is FORBIDDEN.
+8. If shell/hollow is required â†’ use shell(). A solid body is FORBIDDEN.
+9. If multiple holes are required â†’ use PolarLocations or GridLocations.
 10. NEVER simplify a complex object into a single primitive.
+11. For external threads use Helix + sweep with mode=Mode.ADD, while keeping shaft/body solids.
+12. If 4 corner features are required, include exactly 4 corner placements and do not omit any.
+13. For corner-feature parts, use BuildPart + BuildSketch + Locations with corner offsets based on length/width.
 
-Output ONLY the complete Python script — nothing else."""
+Output ONLY the complete Python script â€” nothing else."""
 
-    cache_id = _cache_key("coder", safe_path, blueprint)
+    if strict_instruction.strip():
+        system += f"\n\n{strict_instruction.strip()}"
+    cache_id = _cache_key("coder", safe_path, blueprint, strict_instruction)
     cached = _CODER_CACHE.get(cache_id)
     if cached:
         return cached
@@ -662,9 +1074,9 @@ Output ONLY the complete Python script — nothing else."""
     return cleaned
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  EXECUTION
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def patch_export(code: str, stl_path: str) -> str:
     """Rewrite any export_stl call to the correct standalone form."""
@@ -680,6 +1092,76 @@ def patch_export(code: str, stl_path: str) -> str:
     if not injected:
         out.append(f"export_stl(b.part, '{safe_path}')")
     return "\n".join(out)
+
+
+def _count_location_tuples(code_text: str) -> int:
+    total = 0
+    calls = re.findall(
+        r"with\s+Locations\s*\((.*?)\)\s*:",
+        code_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for call in calls:
+        total += len(re.findall(r"\(\s*[^()]+?\s*,\s*[^()]+?\s*\)", call))
+    return total
+
+
+def validate(summary: str, code: str) -> str:
+    s = (summary or "").lower()
+    code_text = code or ""
+    code_lower = code_text.lower()
+
+    if len(code_text.strip()) < CODE_MIN_LENGTH:
+        return "invalid_output_too_short"
+    if "export_stl(" not in code_lower:
+        return "missing_export"
+
+    extrude_count = len(re.findall(r"\bextrude\s*\(", code_text, flags=re.IGNORECASE))
+    if "table" in s and extrude_count < 5:
+        return "missing_parts_table"
+    if "shaft" in s and "stepped" in s and extrude_count < 3:
+        return "missing_parts_stepped_shaft"
+
+    needs_hole = ("hole" in s or "bore" in s or classify_object(summary) == "hole_part")
+    if needs_hole and "hole(" not in code_lower:
+        return "missing_hole"
+
+    needs_thread = any(keyword in s for keyword in ("thread", "threaded", "screw", "bolt", "nut", "stud"))
+    if needs_thread:
+        if "helix(" not in code_lower and "sweep(" not in code_lower:
+            return "missing_thread_feature"
+        if "helix(" not in code_lower:
+            return "missing_thread_helix"
+        if "sweep(" not in code_lower:
+            return "missing_thread_sweep"
+        if any(k in s for k in ("screw", "bolt", "stud")) and "mode.add" not in code_lower:
+            return "missing_threads_mode_add"
+        if extrude_count < 1:
+            return "thread_replaces_shaft"
+
+    if "gear" in s and "polarlocations" not in code_lower:
+        return "missing_gear_pattern"
+
+    if any(k in s for k in ("holes", "pattern", "grid", "bolt circle", "multi-hole", "multiple holes")):
+        if "gridlocations" not in code_lower and "polarlocations" not in code_lower:
+            return "missing_hole_pattern"
+
+    needs_corner_features = _has_corner_feature_request(summary)
+    if needs_corner_features:
+        if "locations(" not in code_lower:
+            return "missing_corner_locations"
+        if extrude_count < 2:
+            return "missing_corner_extrudes"
+        if _requires_four_corners(summary) and _count_location_tuples(code_text) < 4:
+            return "missing_four_corner_features"
+        if "x_off" not in code_lower and "y_off" not in code_lower and "length / 2" not in code_lower:
+            return "missing_corner_offset_logic"
+
+    return "ok"
+
+
+def validate_code(code: str, summary: str) -> str:
+    return validate(summary, code)
 
 
 THREAD_TRIGGER_KEYWORDS = (
@@ -964,39 +1446,112 @@ def run_pipeline(summary: str):
 
     print("\n" + "=" * 50 + "\n[MECHAI] Pipeline start\n" + "=" * 50)
 
+    detected_obj = detect_object(summary)
+    classified_obj = classify_object(summary)
+
     if should_use_deterministic_pipeline(summary):
-        print("[MECHAI] Using deterministic fastener pipeline.")
+        print("[MECHAI] Using deterministic simple-shape pipeline.")
         try:
             path = generate_fallback(summary, STL_PATH)
             _PIPELINE_CACHE[cache_id] = path
-            print(f"[Deterministic] SUCCESS — {path}")
+            print(f"[Deterministic] SUCCESS - {path}")
             return path
         except Exception as e:
-            print(f"[Deterministic] Failed: {e}\n→ Falling back to LLM pipeline...")
+            print(f"[Deterministic] Failed: {e}\n-> Falling back to LLM pipeline...")
 
-    blueprint = prompt_agent(summary)
-    
-    if VERBOSE_LOGS:
-        print(f"[Agent 2] Blueprint:\n{blueprint[:400]}\n")
+    # STAGE 1: GENERATE
+    blueprint = None
+    initial_code = generate_specialized_code(summary, STL_PATH)
+    if initial_code is not None and (
+        detected_obj == "table"
+        or classified_obj == "gear"
+        or classified_obj == "hole_part"
+        or classified_obj == "corner_feature_part"
+        or detected_obj in {"gear", "helmet", "frame"}
+        or classified_obj == "organic"
+    ):
+        code = patch_export(initial_code, STL_PATH)
+    else:
+        blueprint = prompt_agent(summary)
+        if VERBOSE_LOGS:
+            print(f"[Agent 2] Blueprint:\n{blueprint[:400]}\n")
+        raw_code = coder_agent(blueprint, STL_PATH)
+        code = patch_export(raw_code, STL_PATH)
 
-    raw_code = coder_agent(blueprint, STL_PATH)
-    code = patch_export(raw_code, STL_PATH)
+    # STAGE 2: VALIDATE
+    validation_error = validate(summary, code)
 
-    if VERBOSE_LOGS:
-        print(f"[Agent 3] Code:\n{code[:400]}\n")
+    # STAGE 3: AUTO-FIX (RETRY)
+    if validation_error != "ok":
+        print(f"[Validate] FAILED (1/{MAX_AUTOFIX_RETRIES + 1}) - {validation_error}")
+        if blueprint is None:
+            blueprint = prompt_agent(summary)
+            if VERBOSE_LOGS:
+                print(f"[Agent 2] Blueprint:\n{blueprint[:400]}\n")
+
+        for retry_idx in range(MAX_AUTOFIX_RETRIES):
+            strict_instruction = (
+                f"STRICT FIX: previous output invalid because {validation_error}. Regenerate correctly. "
+                "MUST include it. DO NOT skip. "
+                "Threads MUST use Helix + sweep and Mode.ADD while keeping the shaft/body. "
+                "Holes MUST be created using Hole(). "
+                "Tables MUST include 1 tabletop and 4 legs. "
+                "Stepped shafts MUST include at least 3 stacked extrudes. "
+                "Gears MUST include PolarLocations. "
+                "If corner features are requested, build base first and include exactly 4 corner features at corner offsets using Locations()."
+            )
+            raw_code = coder_agent(blueprint, STL_PATH, strict_instruction)
+            candidate_code = patch_export(raw_code, STL_PATH)
+            validation_error = validate(summary, candidate_code)
+            if validation_error == "ok":
+                code = candidate_code
+                break
+            print(
+                f"[Validate] FAILED ({retry_idx + 2}/{MAX_AUTOFIX_RETRIES + 1}) - {validation_error}"
+            )
+
+    if validation_error == "ok":
+        if VERBOSE_LOGS:
+            print(f"[Agent 3] Code:\n{code[:400]}\n")
+
+        exec_error = None
+        for exec_attempt in range(2):
+            try:
+                path = execute_code(code, STL_PATH, summary)
+                if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+                    raise RuntimeError("Execution produced missing or empty STL.")
+                _PIPELINE_CACHE[cache_id] = path
+                print(f"[Engine] SUCCESS - {path}")
+                return path
+            except Exception as e:
+                exec_error = e
+                print(f"[Engine] Execution failed ({exec_attempt + 1}/2): {e}")
+        print(f"[Engine] Execution retry exhausted: {exec_error}\n-> Switching to fallback...")
+    else:
+        print(f"[Validate] Final failure: {validation_error}\n-> Switching to fallback...")
 
     try:
-        path = execute_code(code, STL_PATH, summary)
-        _PIPELINE_CACHE[cache_id] = path
-        print(f"[Engine] SUCCESS — {path}")
-        return path
-    except Exception as e:
-        print(f"[Engine] LLM code failed: {e}\n→ Switching to fallback...")
+        fallback_specialized = generate_specialized_code(summary, STL_PATH)
+        if fallback_specialized is not None:
+            fallback_exec_error = None
+            for exec_attempt in range(2):
+                try:
+                    path = execute_code(fallback_specialized, STL_PATH, summary)
+                    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+                        raise RuntimeError("Specialized fallback produced missing or empty STL.")
+                    _PIPELINE_CACHE[cache_id] = path
+                    print(f"[Fallback-Specialized] SUCCESS - {path}")
+                    return path
+                except Exception as e:
+                    fallback_exec_error = e
+                    print(f"[Fallback-Specialized] Execution failed ({exec_attempt + 1}/2): {e}")
+            print(f"[Fallback-Specialized] Failed after retry: {fallback_exec_error}")
 
-    try:
         path = generate_fallback(summary, STL_PATH)
+        if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+            raise RuntimeError("Fallback produced missing or empty STL.")
         _PIPELINE_CACHE[cache_id] = path
-        print(f"[Fallback] SUCCESS — {path}")
+        print(f"[Fallback] SUCCESS - {path}")
         return path
     except Exception as e:
         print(f"[Fallback] Failed: {e}\n{traceback.format_exc()}")
@@ -1004,9 +1559,9 @@ def run_pipeline(summary: str):
     return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  CHAT HANDLER
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def chat_handler(user_message, history):
     direct_summary = build_direct_summary(user_message)
@@ -1022,11 +1577,11 @@ def chat_handler(user_message, history):
         try:
             stl_file = run_pipeline(pipeline_input)
             viewer_file = prepare_viewer_model(stl_file) if stl_file else None
-            bot_reply += "\n\n✅ **3D model generated!** Check the viewer →" if stl_file \
-                         else "\n\n⚠️ Generation failed. Please try again."
+            bot_reply += "\n\nâœ… **3D model generated!** Check the viewer â†’" if stl_file \
+                         else "\n\nâš ï¸ Generation failed. Please try again."
         except Exception as e:
             print(traceback.format_exc())
-            bot_reply += f"\n\n⚠️ Error: {str(e)}"
+            bot_reply += f"\n\nâš ï¸ Error: {str(e)}"
 
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": bot_reply})
@@ -1052,20 +1607,20 @@ def chat_handler(user_message, history):
         try:
             stl_file = run_pipeline(bot_reply)
             viewer_file = prepare_viewer_model(stl_file) if stl_file else None
-            bot_reply += "\n\n✅ **3D model generated!** Check the viewer →" if stl_file \
-                         else "\n\n⚠️ Generation failed. Please try again."
+            bot_reply += "\n\nâœ… **3D model generated!** Check the viewer â†’" if stl_file \
+                         else "\n\nâš ï¸ Generation failed. Please try again."
         except Exception as e:
             print(traceback.format_exc())
-            bot_reply += f"\n\n⚠️ Error: {str(e)}"
+            bot_reply += f"\n\nâš ï¸ Error: {str(e)}"
 
     history.append({"role": "user",      "content": user_message})
     history.append({"role": "assistant", "content": bot_reply})
     return "", history, viewer_file
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  GRADIO UI
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 CUSTOM_CSS = """
 .gradio-container{background:#0f1319 !important;font-family:'Segoe UI',system-ui,sans-serif;}
@@ -1089,7 +1644,7 @@ CUSTOM_CSS = """
 
 def create_ui():
     with gr.Blocks(
-        css=CUSTOM_CSS, title="MECHAI — Mechanical Design AI",
+        css=CUSTOM_CSS, title="MECHAI â€” Mechanical Design AI",
         theme=gr.themes.Base(
             primary_hue=gr.themes.colors.green,
             secondary_hue=gr.themes.colors.gray,
@@ -1116,18 +1671,18 @@ def create_ui():
                         placeholder="e.g. 'M6 screw, 30mm long' or 'hex nut inner 10mm outer 20mm thick 8mm'",
                         show_label=False, elem_id="user-input", scale=5, lines=1, max_lines=3,
                     )
-                    send_btn = gr.Button("Send ➤", elem_id="send-btn", scale=1, variant="primary")
-                clear_btn = gr.Button("🔄 New Design", elem_id="clear-btn", size="sm")
+                    send_btn = gr.Button("Send âž¤", elem_id="send-btn", scale=1, variant="primary")
+                clear_btn = gr.Button("ðŸ”„ New Design", elem_id="clear-btn", size="sm")
 
             with gr.Column(scale=2):
-                gr.Markdown("#### 🔧 3D Model Viewer")
+                gr.Markdown("#### ðŸ”§ 3D Model Viewer")
                 model_viewer = gr.Model3D(
                     label="Generated Model", elem_id="model-viewer",
                     height=500, clear_color=[0.059, 0.075, 0.098, 1.0],
                 )
                 gr.Markdown("*Your 3D model will appear here after generation.*", elem_classes=["label-text"])
 
-        gr.HTML('<div id="footer"><p>MECHAI ENGINE • Ollama + build123d</p></div>')
+        gr.HTML('<div id="footer"><p>MECHAI ENGINE â€¢ Ollama + build123d</p></div>')
 
         send_btn.click(fn=chat_handler, inputs=[user_input, chatbot], outputs=[user_input, chatbot, model_viewer])
         user_input.submit(fn=chat_handler, inputs=[user_input, chatbot], outputs=[user_input, chatbot, model_viewer])
@@ -1140,7 +1695,8 @@ def create_ui():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  MECHAI — Mechanical Design AI")
+    print("  MECHAI â€” Mechanical Design AI")
     print(f"  STL output: {STL_PATH}")
     print("=" * 50)
     create_ui().launch(inbrowser=True)
+
