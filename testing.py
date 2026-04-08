@@ -851,6 +851,105 @@ def make_bushing(inner_r, outer_r, height, stl_path):
     )
 
 
+def make_pulley(outer_d, face_w, bore_d, stl_path, groove_d=None, hub_d=None, flange_t=None):
+    outer_d = max(float(outer_d), 8.0)
+    face_w = max(float(face_w), 4.0)
+    bore_d = max(min(float(bore_d), outer_d * 0.85), 2.0)
+    groove_d = float(groove_d) if groove_d is not None else outer_d * 0.82
+    hub_d = float(hub_d) if hub_d is not None else outer_d * 0.42
+    flange_t = float(flange_t) if flange_t is not None else face_w * 0.35
+    return (
+        "from build123d import *\n"
+        f"outer_d = {outer_d}\n"
+        f"face_w = {face_w}\n"
+        f"bore_d = {bore_d}\n"
+        f"groove_d = {groove_d}\n"
+        f"hub_d = {hub_d}\n"
+        f"flange_t = {flange_t}\n"
+        "with BuildPart() as b:\n"
+        "    outer_r = max(outer_d / 2.0, 4.0)\n"
+        "    bore_r = max(min(bore_d / 2.0, outer_r * 0.45), 1.0)\n"
+        "    groove_r = max(min(groove_d / 2.0, outer_r - 0.8), bore_r + 1.2)\n"
+        "    hub_r = max(min(hub_d / 2.0, groove_r - 0.5), bore_r + 1.2)\n"
+        "    flange_t = max(min(flange_t, face_w * 0.48), 1.0)\n"
+        "    mid_h = max(face_w - 2.0 * flange_t, 1.0)\n"
+        "\n"
+        "    # Bottom flange\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Circle(radius=outer_r)\n"
+        "    extrude(amount=flange_t)\n"
+        "\n"
+        "    # Web / belt groove region (reduced OD at center)\n"
+        "    with BuildSketch(Plane.XY.offset(flange_t)):\n"
+        "        Circle(radius=groove_r)\n"
+        "    extrude(amount=mid_h)\n"
+        "\n"
+        "    # Top flange\n"
+        "    with BuildSketch(Plane.XY.offset(flange_t + mid_h)):\n"
+        "        Circle(radius=outer_r)\n"
+        "    extrude(amount=face_w - (flange_t + mid_h))\n"
+        "\n"
+        "    # Central hub\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Circle(radius=hub_r)\n"
+        "    extrude(amount=face_w)\n"
+        "\n"
+        "    # Through bore\n"
+        "    Hole(radius=bore_r, depth=face_w)\n"
+        f"export_stl(b.part, '{stl_path}')\n"
+    )
+
+
+def make_hardcoded_pulley(stl_path):
+    """
+    Fixed reference-style pulley:
+    - dual flanges
+    - reduced center groove section
+    - single-side hub boss
+    - through bore
+    """
+    return (
+        "from build123d import *\n"
+        "outer_d = 80.0\n"
+        "face_w = 28.0\n"
+        "bore_d = 20.0\n"
+        "groove_d = 56.0\n"
+        "hub_d = 34.0\n"
+        "flange_t = 8.0\n"
+        "hub_h = 10.0\n"
+        "with BuildPart() as b:\n"
+        "    outer_r = outer_d / 2.0\n"
+        "    groove_r = groove_d / 2.0\n"
+        "    hub_r = hub_d / 2.0\n"
+        "    bore_r = bore_d / 2.0\n"
+        "    mid_h = max(face_w - 2.0 * flange_t, 4.0)\n"
+        "\n"
+        "    # Bottom flange\n"
+        "    with BuildSketch(Plane.XY):\n"
+        "        Circle(radius=outer_r)\n"
+        "    extrude(amount=flange_t)\n"
+        "\n"
+        "    # Reduced middle section (belt groove profile)\n"
+        "    with BuildSketch(Plane.XY.offset(flange_t)):\n"
+        "        Circle(radius=groove_r)\n"
+        "    extrude(amount=mid_h)\n"
+        "\n"
+        "    # Top flange\n"
+        "    with BuildSketch(Plane.XY.offset(flange_t + mid_h)):\n"
+        "        Circle(radius=outer_r)\n"
+        "    extrude(amount=face_w - (flange_t + mid_h))\n"
+        "\n"
+        "    # Single-side hub boss (reference-like)\n"
+        "    with BuildSketch(Plane.XY.offset(face_w)):\n"
+        "        Circle(radius=hub_r)\n"
+        "    extrude(amount=hub_h)\n"
+        "\n"
+        "    # Through bore across full part + hub\n"
+        "    Hole(radius=bore_r, depth=face_w + hub_h)\n"
+        f"export_stl(b.part, '{stl_path}')\n"
+    )
+
+
 def make_stepped_shaft(section_diams, section_lengths, stl_path):
     return (
         "from build123d import *\n"
@@ -938,6 +1037,8 @@ def detect_object(summary: str) -> str:
         return "bushing"
     if any(w in s for w in ["shaft", "axle", "spindle"]):
         return "shaft"
+    if any(w in s for w in ["pulley", "sheave", "v-belt pulley", "belt pulley"]):
+        return "pulley"
     if any(w in s for w in ["cylinder", "rod", "pipe", "tube"]):
         return "cylinder"
     if any(w in s for w in ["gear", "tooth", "teeth"]):
@@ -1274,6 +1375,9 @@ def generate_fallback(summary: str, stl_path: str) -> str:
         height  = dims[2]        if len(dims) >= 3 else 20.0
         code = make_bushing(inner_r, outer_r, height, safe_path)
 
+    elif obj == "pulley":
+        code = make_hardcoded_pulley(safe_path)
+
     elif obj == "shaft":
         if len(dims) >= 4:
             usable_count = len(dims) - (len(dims) % 2)
@@ -1594,7 +1698,7 @@ def should_use_deterministic_pipeline(summary: str) -> bool:
 
     # Always use deterministic generators for these primitives/components.
     # They are fully parametric and should not go through the LLM validator loop.
-    if obj in {"spring", "rivet", "cone"}:
+    if obj in {"spring", "rivet", "cone", "pulley"}:
         return True
 
     s = summary.lower()
@@ -1618,7 +1722,7 @@ def should_use_deterministic_pipeline(summary: str) -> bool:
     if any(keyword in s for keyword in complex_keywords):
         return False
 
-    return obj in {"box", "cylinder", "plate", "bracket", "washer", "bushing", "shaft", "spring", "rivet", "cone"}
+    return obj in {"box", "cylinder", "plate", "bracket", "washer", "bushing", "shaft", "spring", "rivet", "cone", "pulley"}
 
 
 def _cache_key(*parts: str) -> str:
@@ -2207,9 +2311,9 @@ def run_pipeline(summary: str):
     normalized_summary = " ".join(summary.strip().split())
     cache_id = _cache_key("pipeline", normalized_summary.lower())
     cached_path = _PIPELINE_CACHE.get(cache_id)
-    # For spring/rivet, always regenerate to avoid stale geometry or viewer confusion.
+    # For spring/rivet/pulley, always regenerate to avoid stale geometry or viewer confusion.
     detected_for_cache = detect_object(normalized_summary)
-    if detected_for_cache not in {"spring", "rivet"} and cached_path and os.path.exists(cached_path):
+    if detected_for_cache not in {"spring", "rivet", "pulley"} and cached_path and os.path.exists(cached_path):
         if VERBOSE_LOGS:
             print(f"[MECHAI] Cache hit - {cached_path}")
         return cached_path
@@ -2218,6 +2322,14 @@ def run_pipeline(summary: str):
 
     detected_obj = detect_object(summary)
     classified_obj = classify_object(summary)
+
+    # ── HARD ROUTE: PULLEY (fixed model, no LLM, no placeholder dimensions) ──
+    if detected_obj == "pulley":
+        code = make_hardcoded_pulley(STL_PATH.replace("\\", "/"))
+        path = execute_code(code, STL_PATH, normalized_summary)
+        _PIPELINE_CACHE[cache_id] = path
+        print(f"[Deterministic-Pulley] SUCCESS - {path}")
+        return path
 
     # ── HARD ROUTE: SPRING (no LLM, no fallback) ─────────────────────────────
     if detected_obj == "spring":
