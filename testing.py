@@ -681,6 +681,17 @@ def make_box(length, width, height, stl_path):
     )
 
 
+def make_cone(radius, height, stl_path):
+    # Build123d has a Cone primitive in supported environments.
+    # We intentionally keep this simple (no fillets/holes) and dimension-driven.
+    return (
+        "from build123d import *\n"
+        f"with BuildPart() as b:\n"
+        f"    Cone(bottom_radius={radius}, top_radius=0, height={height})\n"
+        f"export_stl(b.part, '{stl_path}')\n"
+    )
+
+
 def make_washer(inner_r, outer_r, thickness, stl_path):
     return make_circle_nut(inner_r, outer_r, thickness, stl_path)
 
@@ -853,6 +864,8 @@ def detect_object(summary: str) -> str:
         return "frame"
     if any(w in s for w in ["table", "desk"]):
         return "table"
+    if any(w in s for w in ["cone", "conical", "taper", "tapered", "frustum"]):
+        return "cone"
     if any(w in s for w in ["box", "cube", "rect", "block", "enclosure"]):
         return "box"
     return "unknown"
@@ -1209,11 +1222,37 @@ def generate_fallback(summary: str, stl_path: str) -> str:
     elif obj == "frame":
         code = generate_frame(summary, safe_path)
 
+    elif obj == "cone":
+        # Accept prompts like:
+        # - "cone radius 6mm height 20mm"
+        # - "cone diameter 12mm height 20mm" (interprets first value as diameter)
+        # - "cone 12 20" (defaults to diameter+height, consistent with cylinder path)
+        r_in = _extract_labeled_value(summary, [r"Base\s*Radius", r"Radius", r"R\b"])
+        h_in = _extract_labeled_value(summary, [r"Height", r"H\b"])
+        if r_in is None and dims:
+            r_in = dims[0]
+        if h_in is None:
+            h_in = dims[1] if len(dims) >= 2 else 20.0
+
+        # If user explicitly said radius, treat value as radius. Otherwise treat as diameter (like cylinder).
+        radius = r_in if ("radius" in lowered or re.search(r"\br\b", lowered)) else (r_in / 2.0)
+        radius = max(float(radius or 10.0), 0.1)
+        height = max(float(h_in or 20.0), 0.1)
+        code = make_cone(radius, height, safe_path)
+
     elif obj == "box":
-        l = dims[0] if len(dims) >= 1 else 20.0
-        w = dims[1] if len(dims) >= 2 else 20.0
-        h = dims[2] if len(dims) >= 3 else 10.0
-        code = make_box(l, w, h, safe_path)
+        if "cube" in lowered:
+            side = (
+                _extract_labeled_value(summary, [r"Side(?:\s*Length)?", r"Edge(?:\s*Length)?", r"Cube\s*Size", r"Size"])
+                or (dims[0] if len(dims) >= 1 else 20.0)
+            )
+            side = max(float(side), 0.1)
+            code = make_box(side, side, side, safe_path)
+        else:
+            l = dims[0] if len(dims) >= 1 else 20.0
+            w = dims[1] if len(dims) >= 2 else 20.0
+            h = dims[2] if len(dims) >= 3 else 10.0
+            code = make_box(l, w, h, safe_path)
 
     else:
         radius = (dims[0] / 2) if len(dims) >= 1 else 10.0
