@@ -18,6 +18,7 @@ import tempfile
 import subprocess
 import sys
 import uuid
+import hashlib
 from openai import OpenAI
 
 # ── Ollama client ────────────────────────────────────────────────────────
@@ -26,6 +27,17 @@ client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 STL_PATH = os.path.join(MODEL_DIR, "model.stl").replace("\\", "/")
+
+# Performance tuning (keeps geometry logic intact)
+VERBOSE_LOGS = False
+MAX_HISTORY_MESSAGES = 8
+PROMPT_MAX_TOKENS = 500
+CODER_MAX_TOKENS = 650
+COLLECTOR_MAX_TOKENS = 220
+
+_PROMPT_CACHE: dict[str, str] = {}
+_CODER_CACHE: dict[str, str] = {}
+_PIPELINE_CACHE: dict[str, str] = {}
 
 
 def prepare_viewer_model(stl_path: str) -> str | None:
@@ -436,6 +448,11 @@ def should_use_deterministic_pipeline(summary: str) -> bool:
     return detect_object(summary) != "unknown"
 
 
+def _cache_key(*parts: str) -> str:
+    payload = "\n||\n".join(part or "" for part in parts)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  AGENTS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -519,15 +536,23 @@ CRITICAL RULES:
 
 Output ONLY the structured blueprint (Steps 1–4). No code, no preamble."""
 
+    cache_id = _cache_key("prompt", summary)
+    cached = _PROMPT_CACHE.get(cache_id)
+    if cached:
+        return cached
+
     res = client.chat.completions.create(
         model="qwen2:7b",
         messages=[
             {"role": "system", "content": system},
             {"role": "user",   "content": f"Summary:\n{summary}"},
         ],
-        max_tokens=800,
+        temperature=0,
+        max_tokens=PROMPT_MAX_TOKENS,
     )
-    return res.choices[0].message.content
+    output = res.choices[0].message.content
+    _PROMPT_CACHE[cache_id] = output
+    return output
 
 
 def coder_agent(blueprint: str, stl_path: str) -> str:
@@ -615,6 +640,11 @@ GENERAL RULES
 
 Output ONLY the complete Python script — nothing else."""
 
+    cache_id = _cache_key("coder", safe_path, blueprint)
+    cached = _CODER_CACHE.get(cache_id)
+    if cached:
+        return cached
+
     res = client.chat.completions.create(
         model="deepseek-coder:6.7b",
         messages=[
@@ -622,12 +652,14 @@ Output ONLY the complete Python script — nothing else."""
             {"role": "user",   "content": blueprint},
         ],
         temperature=0,
-        max_tokens=800,
+        max_tokens=CODER_MAX_TOKENS,
     )
     raw = res.choices[0].message.content.strip()
     raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
-    return raw.strip()
+    cleaned = raw.strip()
+    _CODER_CACHE[cache_id] = cleaned
+    return cleaned
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -881,9 +913,10 @@ if not os.path.exists(r"{safe_path}") or os.path.getsize(r"{safe_path}") == 0:
     raise RuntimeError("STL export failed or produced an empty file.")
 """
 
-    print("\n[Engine] Executing:\n" + "=" * 40)
-    print(clean)
-    print("=" * 40)
+    if VERBOSE_LOGS:
+        print("\n[Engine] Executing:\n" + "=" * 40)
+        print(clean[:2000] + ("\n... [truncated]" if len(clean) > 2000 else ""))
+        print("=" * 40)
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, encoding="utf-8"
@@ -897,14 +930,18 @@ if not os.path.exists(r"{safe_path}") or os.path.getsize(r"{safe_path}") == 0:
 
         proc = subprocess.run(
             [sys.executable, tmp],
-            capture_output=True, text=True, timeout=120
+            stdout=subprocess.PIPE if VERBOSE_LOGS else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
         )
-        print("[Engine] STDOUT:", proc.stdout)
-        if proc.stderr:
+        if VERBOSE_LOGS and proc.stdout:
+            print("[Engine] STDOUT:", proc.stdout)
+        if proc.stderr and (proc.returncode != 0 or VERBOSE_LOGS):
             print("[Engine] STDERR:", proc.stderr)
 
         if proc.returncode != 0:
-            raise RuntimeError(proc.stderr)
+            raise RuntimeError(proc.stderr or "Generated script failed.")
 
         if os.path.exists(stl_path):
             return stl_path
@@ -917,49 +954,40 @@ if not os.path.exists(r"{safe_path}") or os.path.getsize(r"{safe_path}") == 0:
 
 
 def run_pipeline(summary: str):
+    normalized_summary = " ".join(summary.strip().split())
+    cache_id = _cache_key("pipeline", normalized_summary.lower())
+    cached_path = _PIPELINE_CACHE.get(cache_id)
+    if cached_path and os.path.exists(cached_path):
+        if VERBOSE_LOGS:
+            print(f"[MECHAI] Cache hit - {cached_path}")
+        return cached_path
+
     print("\n" + "=" * 50 + "\n[MECHAI] Pipeline start\n" + "=" * 50)
 
     if should_use_deterministic_pipeline(summary):
         print("[MECHAI] Using deterministic fastener pipeline.")
         try:
             path = generate_fallback(summary, STL_PATH)
+            _PIPELINE_CACHE[cache_id] = path
             print(f"[Deterministic] SUCCESS — {path}")
             return path
         except Exception as e:
             print(f"[Deterministic] Failed: {e}\n→ Falling back to LLM pipeline...")
 
     blueprint = prompt_agent(summary)
-    print(f"[Agent 2] Blueprint:\n{blueprint[:400]}\n")
+    
+    if VERBOSE_LOGS:
+        print(f"[Agent 2] Blueprint:\n{blueprint[:400]}\n")
 
     raw_code = coder_agent(blueprint, STL_PATH)
     code = patch_export(raw_code, STL_PATH)
 
-    # ===============================gpt
-    # ✅ SIMPLE ERROR HANDLING (ADD HERE)
-    # ===============================
-    s = summary.lower()
-
-    # Fix 1: Remove unwanted holes
-    if "shaft" in s and "hole" not in s and "Hole(" in code:
-        code = code.replace("Hole(", "# removed Hole(")
-
-    # Fix 2: Add hole ONLY if clearly required
-    if "hole" in s and "Hole(" not in code:
-        code += "\n# Auto-added hole\nHole(radius=2)"
-
-    # Fix 3: FORCE threads if missing
-    if any(k in s for k in ["screw", "bolt", "thread"]) and "Helix" not in code:
-        print("⚠️ Missing threads → retrying coder_agent...")
-        
-        raw_code = coder_agent(blueprint + "\nIMPORTANT: MUST include threads using Helix + sweep", STL_PATH)
-        code = patch_export(raw_code, STL_PATH)
-
-# ===============================gpt
-
-    print(f"[Agent 3] Code:\n{code[:400]}\n")
+    if VERBOSE_LOGS:
+        print(f"[Agent 3] Code:\n{code[:400]}\n")
 
     try:
         path = execute_code(code, STL_PATH, summary)
+        _PIPELINE_CACHE[cache_id] = path
         print(f"[Engine] SUCCESS — {path}")
         return path
     except Exception as e:
@@ -967,6 +995,7 @@ def run_pipeline(summary: str):
 
     try:
         path = generate_fallback(summary, STL_PATH)
+        _PIPELINE_CACHE[cache_id] = path
         print(f"[Fallback] SUCCESS — {path}")
         return path
     except Exception as e:
@@ -1004,12 +1033,17 @@ def chat_handler(user_message, history):
         return "", history, viewer_file
 
     messages = [{"role": "system", "content": INTRO_SYSTEM}]
-    for msg in history:
+    for msg in history[-MAX_HISTORY_MESSAGES:]:
         if msg["role"] in ("user", "assistant"):
             messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    res = client.chat.completions.create(model="qwen2:7b", messages=messages)
+    res = client.chat.completions.create(
+        model="qwen2:7b",
+        messages=messages,
+        temperature=0,
+        max_tokens=COLLECTOR_MAX_TOKENS,
+    )
     bot_reply = res.choices[0].message.content
 
     stl_file = None
