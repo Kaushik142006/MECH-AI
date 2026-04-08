@@ -12,7 +12,7 @@ import joblib
 pd.set_option('display.float_format', '{:.6f}'.format)
 
 # ================= LOAD DATA =================
-df = pd.read_csv('data_sets/data_set.csv')
+df = pd.read_csv('data_sets/updated_manufacturing_dataset.csv')
 df.columns = df.columns.str.lower().str.strip()
 
 df['temperature_c'] = round(df['temperature_c'], 2)
